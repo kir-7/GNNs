@@ -10,11 +10,11 @@ from torch_geometric.nn import MessagePassing, global_mean_pool
 from torch_scatter import scatter
 
 # GNN have 3 types of pooling(information gathering from other nodes, edges and global) - message passing, convolutions and Pooling
-# https://github.com/chaitjo/geometric-gnn-dojo/blob/main/geometric_gnn_101.ipynb
+
 class gLayer(MessagePassing):
-    def __init__(self, emb_dim=25, edge_dim=25, activation='relu', norm='batch', aggr='sum', device='cpu'):
+    def __init__(self, emb_dim=25, edge_dim=25, activation='relu', norm='batch', aggr='add', device='cpu'):
         
-        super(gLayer, self).__init__()
+        super().__init__(aggr=aggr)
 
         self.emb_dim = emb_dim
         self.edge_dim = edge_dim
@@ -39,24 +39,24 @@ class gLayer(MessagePassing):
             Linear(emb_dim, emb_dim), self.norm(emb_dim), self.activation
         )
 
-    def forward(self, h, edge_index, edge_attr):
 
-        out = self.propagate(edge_index, h=h, edge_attr=edge_attr)  
+    def forward(self, h, edge_index, edge_attr):
+        
+        out = self.propagate(edge_index, h=h, edge_attr=edge_attr)
         return out
 
-    def messgae(self, h_i, h_j, edge_attr):
-        
-        msg = torch.cat([h_i, h_j, edge_attr], dim=1)
+    def message(self, h_i, h_j, edge_attr):
+       
+        msg = torch.cat([h_i, h_j, edge_attr], dim=-1)
         return self.mlp_msg(msg)
-
-
+    
     def aggregate(self, inputs, index):
-        
+       
         return scatter(inputs, index, dim=self.node_dim, reduce=self.aggr)
-
+    
     def update(self, aggr_out, h):
-        
-        upd_out = torch.cat([h, aggr_out], dim=1)
+
+        upd_out = torch.cat([h, aggr_out], dim=-1)
         return self.mlp_upd(upd_out)
 
     def __repr__(self) -> str:
