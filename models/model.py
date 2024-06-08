@@ -1,33 +1,44 @@
 import torch
+from torch import nn
+from torch.nn import Linear
 import torch.nn.functional as F
-import torch_geometric
+from torch_geometric.nn import global_mean_pool
 
-import numpy as np
-import os
-import random
-import time
 
 from layers import gLayer
 
 
+class GNN(nn.Module):
+    def __init__(self, n_layers=4, emb_dim=50, edge_dim=4, in_dim=10, out_dim=1, batch_size=4):
 
-if __name__ == "__main__":
+        super().__init__()
 
-    #  sanity checking if the layer works input is h{i} = (node, node_dim) 
-    #  output is also of same shape but the h{i+1} 
+        self.batch_size = batch_size
 
-    torch.manual_seed(0)
+        self.lin_in = Linear(in_dim, emb_dim)
 
-    layer = gLayer()
-    print("layer created successfully!")
-    trial_h = torch.randn(10, 25)
-    trial_edge = torch.randint(1, 10, (2, 10))
-    trial_edge_emb = torch.randn(10, 25)
-    with torch.no_grad():
-        out = layer(trial_h, trial_edge, trial_edge_emb)
-        print(out.shape)
+        self.convs = torch.nn.ModuleList()
+
+        for i in range(n_layers):
+            self.convs.append(gLayer(emb_dim, edge_dim))
+        
+        self.pool = global_mean_pool
+
+
+        self.lin_pred = Linear(emb_dim, out_dim)
     
-    print(layer)
 
+    def forward(self, data):
 
-    del layer
+        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+
+        h = self.lin_in(x)
+
+        for conv in self.convs:
+            h = h + conv(h, edge_index, edge_attr)
+        
+        h_graph = self.pool(h, self.batch_size)
+
+        out = self.lin_pred(h_graph)
+
+        return out.view(-1)
