@@ -1,30 +1,64 @@
+
 import torch
 from torch import nn
 import torch.functional as F
-from torch.nn import ReLU, SiLU
+from torch.nn import ReLU, SiLU, Linear, Sequential, LayerNorm, BatchNorm1d
 
-import numpy as np
+import torch_geometric
+import torch_geometric.transforms as T
+from torch_geometric.nn import MessagePassing, global_mean_pool
+from torch_scatter import scatter
 
-import os
-
-# gLinear is a linear layer of GNN that is of format graph-in graph-out and does'nt do any sort of pooling
 # GNN have 3 types of pooling(information gathering from other nodes, edges and global) - message passing, convolutions and Pooling
-
-class gLinear(nn.Module):
-    def __init__(self, emb_dim=25, activation='relu', norm='layer', aggr='none', device='cpu'):
+# https://github.com/chaitjo/geometric-gnn-dojo/blob/main/geometric_gnn_101.ipynb
+class gLayer(MessagePassing):
+    def __init__(self, emb_dim=25, edge_dim=25, activation='relu', norm='batch', aggr='sum', device='cpu'):
         
-        super(gLinear, self).__init__()
+        super(gLayer, self).__init__()
 
         self.emb_dim = emb_dim
+        self.edge_dim = edge_dim
+
         self.activation = {"silu": SiLU(), "relu": ReLU()}[activation]
 
-        self.norm = {"layer": torch.nn.LayerNorm, "batch": torch.nn.BatchNorm1d}[norm]
+        self.norm = {"layer": LayerNorm, "batch": BatchNorm1d}[norm]
 
-    
-    def forward(self, x):
-        pass
-    
-class gPool(nn.Module):
-    
-    def __init__(self, aggr):
-        super(gPool, self).__init__()
+        # MLP `\psi` for computing messages `m_ij`
+        # Implemented as a stack of Linear->BN->ReLU->Linear->BN->ReLU
+        # dims: (2d + d_e) -> d
+        self.mlp_msg = Sequential(
+            Linear(2*emb_dim + self.edge_dim, emb_dim), self.norm(emb_dim), self.activation,
+            Linear(emb_dim, emb_dim), self.norm(emb_dim), ReLU()
+          )
+        
+        # MLP `\phi` for computing updated node features `h_i^{l+1}`
+        # Implemented as a stack of Linear->BN->ReLU->Linear->BN->ReLU
+        # dims: 2d -> d
+        self.mlp_upd = Sequential(
+            Linear(2*emb_dim, emb_dim), self.norm(emb_dim), self.activation,
+            Linear(emb_dim, emb_dim), self.norm(emb_dim), self.activation
+        )
+
+    def forward(self, h, edge_index, edge_attr):
+
+        out = self.propagate(edge_index, h=h, edge_attr=edge_attr)  
+        return out
+
+    def messgae(self, h_i, h_j, edge_attr):
+        
+        msg = torch.cat([h_i, h_j, edge_attr], dim=1)
+        return self.mlp_msg(msg)
+
+
+    def aggregate(self, inputs, index):
+        
+        return scatter(inputs, index, dim=self.node_dim, reduce=self.aggr)
+
+    def update(self, aggr_out, h):
+        
+        upd_out = torch.cat([h, aggr_out], dim=1)
+        return self.mlp_upd(upd_out)
+
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}(emb_dim={self.emb_dim}, aggr={self.aggr})')
+        
