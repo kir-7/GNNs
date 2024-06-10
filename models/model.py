@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import global_mean_pool
 
 
-from layers import gLayer
+from models.layers import gLayer
 
 
 class GNN(nn.Module):
@@ -15,7 +15,7 @@ class GNN(nn.Module):
 
         self.batch_size = batch_size
 
-        self.lin_in = Linear(in_dim, emb_dim)
+        self.lin_in = Linear(in_dim, emb_dim)   
 
         self.convs = torch.nn.ModuleList()
 

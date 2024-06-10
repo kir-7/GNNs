@@ -10,7 +10,11 @@ from torch_geometric.nn import MessagePassing, global_mean_pool
 from torch_scatter import scatter
 
 # GNN have 3 types of pooling(information gathering from other nodes, edges and global) - message passing, convolutions and Pooling
+# https://github.com/chaitjo/geometric-gnn-dojo/blob/main/geometric_gnn_101.ipynb
 
+
+
+# gLayer also uses the edge embeddings to gather information (the edge_attr in message is for edge embedding gathering)
 class gLayer(MessagePassing):
     def __init__(self, emb_dim=25, edge_dim=25, activation='relu', norm='batch', aggr='add', device='cpu'):
         
