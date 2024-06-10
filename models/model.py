@@ -9,11 +9,9 @@ from models.layers import gLayer
 
 
 class GNN(nn.Module):
-    def __init__(self, n_layers=4, emb_dim=50, edge_dim=4, in_dim=10, out_dim=1, batch_size=4):
+    def __init__(self, n_layers=4, emb_dim=50, edge_dim=4, in_dim=10, out_dim=1):
 
         super().__init__()
-
-        self.batch_size = batch_size
 
         self.lin_in = Linear(in_dim, emb_dim)   
 
@@ -23,7 +21,6 @@ class GNN(nn.Module):
             self.convs.append(gLayer(emb_dim, edge_dim))
         
         self.pool = global_mean_pool
-
 
         self.lin_pred = Linear(emb_dim, out_dim)
     
@@ -37,7 +34,7 @@ class GNN(nn.Module):
         for conv in self.convs:
             h = h + conv(h, edge_index, edge_attr)
         
-        h_graph = self.pool(h, self.batch_size)
+        h_graph = self.pool(h, data.batch)
 
         out = self.lin_pred(h_graph)
 
