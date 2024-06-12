@@ -12,6 +12,7 @@ class GNN(nn.Module):
     def __init__(self, n_layers=4, emb_dim=50, edge_dim=4, in_dim=10, out_dim=1):
 
         super().__init__()
+        
 
         self.lin_in = Linear(in_dim, emb_dim)   
 
@@ -35,7 +36,7 @@ class GNN(nn.Module):
             h = h + conv(h, edge_index, edge_attr)
         
         h_graph = self.pool(h, data.batch)
-
+        
         out = self.lin_pred(h_graph)
 
-        return out.view(-1)
+        return out
