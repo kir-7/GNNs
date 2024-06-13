@@ -65,4 +65,8 @@ class gLayer(MessagePassing):
 
     def __repr__(self) -> str:
         return (f'{self.__class__.__name__}(emb_dim={self.emb_dim}, aggr={self.aggr})')
-        
+    
+
+class gKANLayer(MessagePassing):
+    def __init__(self):
+        pass
