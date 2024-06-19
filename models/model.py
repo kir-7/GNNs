@@ -1,11 +1,11 @@
 import torch
 from torch import nn
-from torch.nn import Linear
+from torch.nn import Linear, ReLU, SiLU, LayerNorm, BatchNorm1d, Sequential
 import torch.nn.functional as F
 from torch_geometric.nn import global_mean_pool
 
 
-from models.layers import gLayer
+from models.layers import gLayer, gConv
 
 
 class GNN(nn.Module):
@@ -25,6 +25,13 @@ class GNN(nn.Module):
 
         self.lin_pred = Linear(emb_dim, out_dim)
     
+    def reset_parameters(self):
+        super().reset_parameters()
+        self.lin_in.reset_parameters()
+        for conv in self.convs:
+            conv.reset_parameters()
+        self.pool.reset_parameters()
+        self.lin_pred.reset_parameters()
 
     def forward(self, data):
 
@@ -36,6 +43,78 @@ class GNN(nn.Module):
             h = h + conv(h, edge_index, edge_attr)
         
         h_graph = self.pool(h, data.batch)
+        
+        out = self.lin_pred(h_graph)
+
+        return out
+
+
+class SpatialGCN(nn.Module):
+    
+    '''
+        we have the SpatialGCN which uses the Spatial convolution layers, the filters used represent the dimentionality of the node embeddings
+        so we can structure it in multiple ways
+
+        we can use it similar to the U-Net architechture
+        we can even add skip connections
+        we can use an archiechture similar to that of highway networks
+
+        But depending on the implementation, our model architechture will change so this is'nt a concrete model class just a neat way to bind all things together  
+
+    '''
+
+    def __init__(self, conv_layer_filters, emb_dim, out_dim, aggr='add', edge_dim=4, egde_usage=False, activation='relu', norm='batch'):
+
+        super().__init__()
+
+        self.edge_usage = egde_usage
+
+        self.convs = torch.nn.ModuleList()
+
+        if egde_usage:
+            self.edge_messages = torch.nn.ModuleList()
+
+        self.activation = {"relu":ReLU(), 'selu':SiLU()}[activation]
+        self.norm = {"layer": LayerNorm, "batch": BatchNorm1d}[norm]
+
+        # conv_layers_filters : List of filters that are going to be applied. 
+        # eg: if  conv_layers_filters = [16, 32, 64] then 2 convolutional layers will be applied: 16->32 and 32->64
+
+        self.project = Linear(emb_dim, conv_layer_filters[0])
+
+        for i in range(len(conv_layer_filters)-1):
+            self.convs.append(gConv(conv_layer_filters[i], conv_layer_filters[i+1], aggr=aggr))
+
+            if egde_usage:
+                self.edge_messages.append(Sequential(
+                                            Linear(conv_layer_filters[i+1] + edge_dim, conv_layer_filters[i+1]), self.norm(emb_dim), self.activation,
+                                            Linear(conv_layer_filters[i+1], conv_layer_filters[i+1]), self.norm(emb_dim), ReLU()))
+
+        self.pool = global_mean_pool
+
+        self.lin_pred = Linear(conv_layer_filters[-1], out_dim)
+
+                   
+
+
+    def reset_parameters(self):
+        super().reset_parameters()
+        for conv in self.convs:
+            conv.reset_parameters()
+        self.pool.reset_parameters()
+        self.lin_pred.reset_parameters()
+
+    def forward(self, data):
+        
+        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+
+
+        for i in range(len(self.convs)):
+            x = x + self.convs[i](x, edge_index)
+            msg = torch.cat([x, edge_attr])
+            x = x + self.edge_messages[i](msg)
+
+        h_graph = self.pool(x, data.batch)
         
         out = self.lin_pred(h_graph)
 
