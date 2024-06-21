@@ -7,7 +7,8 @@ from torch.nn import ReLU, SiLU, Linear, Sequential, LayerNorm, BatchNorm1d
 import torch_geometric
 import torch_geometric.transforms as T
 from torch_geometric.nn import MessagePassing, global_mean_pool
-from torch_geometric.utils import add_self_loops, degree
+from torch_geometric.nn.inits import zeros
+from torch_geometric.utils import add_self_loops, degree, get_laplacian
 from torch_scatter import scatter
 
 
@@ -137,3 +138,109 @@ class gConv(MessagePassing):
     def message(self, x_j, norm):
 
         return norm.view(-1, 1) * x_j
+    
+'''
+    After Spatial Convolution next step is more methods of convolutions and building different models using convolutions
+
+    after GCN next step is GIN and then GAN
+
+    along with improvement in the architechture need to improve the functinality as well things like doing 'graph rewiring' and stuff 
+'''
+
+class ChebConv(MessagePassing):
+
+    '''  From PyG official documentation  '''
+
+    def __init__(self, in_channels, out_channels, k, normalization='sym', bias=True):
+        
+        self.in_channels = in_channels
+        self,out_channels - out_channels
+        self.normalization = normalization
+        self.k = k
+
+        self.lins = torch.nn.ModuleList(
+            Linear(in_channels, out_channels, bias=False, weight_initializer='glorot') for _ in range(k)
+        )
+
+        if bias:
+            self.bias = torch.Parameter(torch.Tensor(out_channels))
+        else:
+            self.bias = None
+
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        super().reset_parameters()
+        for lin in self.lins:
+            lin.resset_parameters()
+        zeros(self.bias)
+
+    def __norm__(self, edge_index, num_nodes, edge_weight, normalization, lambda_max=None, dtype=None, batch=None):
+        
+        edge_index, edge_weight = get_laplacian(edge_index, edge_weight, normalization, num_nodes=num_nodes)
+
+        if lambda_max is None:
+            lambda_max = 2.0 * edge_weight.max()
+        else:
+            lambda_max = torch.Tensor(lambda_max, dtype=dtype, device=edge_weight.device)
+        
+
+        if batch is not None and lambda_max.numel() > 1:
+            lambda_max = lambda_max[batch[edge_index[0]]]
+        
+
+        edge_weight = (2.0 * edge_weight) / lambda_max
+        edge_weight.masked_fill_(edge_weight == float('inf'), 0)
+
+        loop_mask = edge_index[0] == edge_index[1]
+        edge_weight[loop_mask] -= 1
+
+        return edge_index, edge_weight
+
+    def message(self, x_j, norm):
+        return norm.view(-1, 1) * x_j
+
+
+    def forward(self, x, edge_index, edge_weight, batch, lambda_max):
+
+        edge_index, norm = self.__norm__(edge_index, x.size(self.node_dim), edge_weight, self.normalization, lambda_max, x.dtype, batch)
+        
+        Tx_0 = x
+        Tx_1 = x
+        out = self.lins[0](Tx_0)
+
+        if len(self.lins) > 1:
+            Tx_1 = self.propogate(edge_index, x=x, norm=norm)
+        
+        for lin in self.lins:
+            
+            Tx_2 = self.propagate(edge_index, x=Tx_1, nomr=norm)
+            Tx_2 = 2.*Tx_2 - Tx_0
+
+            out = out + lin.forward(Tx_2)
+
+            Tx_0 , Tx_1 = Tx_1, Tx_2
+
+
+        if self.bais is not None:
+            out = out + self.bias
+        
+
+        return out
+
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}({self.in_channels}, '
+                f'{self.out_channels}, K={len(self.lins)}, '
+                f'normalization={self.normalization})')
+
+
+class KipfConv(MessagePassing):
+
+    ''' 
+        An extension to Cheb conv, the work of Kipf and Welling, which simplifies the ChebNet approach by utilizing only local information, setting K = 2  
+        https://medium.com/@jlcastrog99/spectral-graph-convolutions-c7241af4d8e2#:~:text=the%20work%20of%20Kipf%20and%20Welling%2C%20which%20simplifies%20the%20ChebNet%20approach%20by%20utilizing%20only%20local%20information%2C%20setting%20K%20%3D%202
+    '''
+    
+    def __init__(self):
+        pass
+
