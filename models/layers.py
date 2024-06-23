@@ -2,13 +2,13 @@
 import torch
 from torch import nn
 import torch.functional as F
-from torch.nn import ReLU, SiLU, Linear, Sequential, LayerNorm, BatchNorm1d
+from torch.nn import ReLU, SiLU, Linear, Sequential, LayerNorm, BatchNorm1d, Parameter
 
 import torch_geometric
 import torch_geometric.transforms as T
 from torch_geometric.nn import MessagePassing, global_mean_pool
-from torch_geometric.nn.inits import zeros
-from torch_geometric.utils import add_self_loops, degree, get_laplacian
+from torch_geometric.nn.inits import zeros, glorot
+from torch_geometric.utils import add_self_loops, degree, get_laplacian, remove_self_loops
 from torch_scatter import scatter
 
 
@@ -108,7 +108,9 @@ class gConv(MessagePassing):
         self.lin = Linear(in_channels, out_channels, bias= False, weight_initializer='glorot', activation=self.activation)
 
         if bias:
-            self.bias = torch.Parameter(torch.empty(out_channels))
+            self.bias = Parameter(torch.empty(out_channels))
+        else:
+            self.bais = None
 
         self.reset_parameters()
 
@@ -142,7 +144,7 @@ class gConv(MessagePassing):
 '''
     After Spatial Convolution next step is more methods of convolutions and building different models using convolutions
 
-    after GCN next step is GIN and then GAN
+    after GCN next step is GIN and then GAT
 
     along with improvement in the architechture need to improve the functinality as well things like doing 'graph rewiring' and stuff 
 '''
@@ -163,7 +165,7 @@ class ChebConv(MessagePassing):
         )
 
         if bias:
-            self.bias = torch.Parameter(torch.Tensor(out_channels))
+            self.bias = Parameter(torch.Tensor(out_channels))
         else:
             self.bias = None
 
@@ -233,14 +235,135 @@ class ChebConv(MessagePassing):
                 f'{self.out_channels}, K={len(self.lins)}, '
                 f'normalization={self.normalization})')
 
+'''
+Coming up GATs and random walks (very messed up ordering)
+'''
+class GATConv(MessagePassing):
+    def __init__(self, in_channels, out_channels, heads=1, concat=True, dropout=0, neagative_slope = 0.2, add_self_loops=True, edge_dim=None, bias=True):
+        
+        super().__init__()
 
-class KipfConv(MessagePassing):
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.heads = heads
+        self.concat = concat
+        self.dropout = dropout
+        self.add_self_loops = add_self_loops
+        self.negative_slope = neagative_slope
+        self.edge_dim = edge_dim
 
-    ''' 
-        An extension to Cheb conv, the work of Kipf and Welling, which simplifies the ChebNet approach by utilizing only local information, setting K = 2  
-        https://medium.com/@jlcastrog99/spectral-graph-convolutions-c7241af4d8e2#:~:text=the%20work%20of%20Kipf%20and%20Welling%2C%20which%20simplifies%20the%20ChebNet%20approach%20by%20utilizing%20only%20local%20information%2C%20setting%20K%20%3D%202
-    '''
+        self.lin_in = None
+
+        self.lin_in = Linear(in_channels, heads*out_channels, bias=False, weight_initializer='glorot')
+
+        self.att_src = Parameter(torch.empty(1, heads, out_channels))
+        self.att_dst = Parameter(torch.empty(1, heads, out_channels))
+
+        if edge_dim is not None:
+        
+            self.lin_edge = Linear(edge_dim, heads*out_channels, bias=False, weight_initializer='glorot')
+            self.att_edge = Parameter(torch.empty(1, heads, out_channels))
+        
+        else:
+            self.lin_edge = self.att_edge = None
+
+        if bias and concat:
+            self.bias = Parameter(torch.empty(heads * out_channels))
+        elif bias and not concat:
+            self.bias = Parameter(torch.empty(out_channels))
+        else:
+            self.bias = None
+
+    def reset_parameters(self) -> None:
+        super().reset_parameters()
+        self.lin_in.reset_parameters()
+        self.lin_edge.reset_parameters()
+
+        if self.lin_edge is not None:
+            self.lin_edge.reset_parameters()
+        
+        if self.att_edge:
+            glorot(self.att_edge)
+
+        zeros(self.bias)
+        glorot(self.att_dst)
+        glorot(self.att_src)
+        
     
-    def __init__(self):
-        pass
+    def forward(self, x, edge_index, edge_attr, size=None):
+        
+        H, C = self.heads, self.out_channels
 
+        if isinstance(x, torch.Tensor):
+
+            if self.lin_in is not None:
+                x_src = x_dst = self.lin_in(x).view(-1, H, C)
+        else:
+            x_src, x_dst = x
+
+            if self.lin_in is not None:
+
+                x_src = self.lin_in(x).view(-1, H, C)
+
+                if x_dst is not None:
+                    x_dst = self.lin_in(x).view(-1, H, C)
+        
+
+        x = (x_src, x_dst)
+
+        alpha_src = (x_src * self.att_src).sum(dim=-1)
+        alpha_dst = None if x_dst is None else (x_dst * self.att_dst).sum(-1)
+        alpha = (alpha_src, alpha_dst)
+    
+        if self.add_self_loops:
+            num_nodes = x_src.size(0)
+            if x_dst is not None:
+                num_nodes = min(num_nodes, x_dst.size(0))
+            num_nodes = min(size) if size is not None else num_nodes
+            edge_index, edge_attr = remove_self_loops(
+                edge_index, edge_attr)
+            edge_index, edge_attr = add_self_loops(
+                edge_index, edge_attr, fill_value=self.fill_value,
+                num_nodes=num_nodes)
+
+        alpha = self.edge_updater(edge_index, alpha=alpha, edge_attr=edge_attr, size=size)
+
+        out = self.propagate(edge_index, x=x, alpha=alpha, size=size)
+
+        if self.concat:
+            out = out.view(-1, self.heads*self.out_channels)
+        else:
+            out = out.mean(dim=1)
+        
+        if self.bias is not None:
+            out = out + self.bias
+        
+
+        return out
+
+    def edge_update(self, alpha_j, alpha_i, edge_attr, index, ptr, dim_size):
+
+        alpha = alpha_j if alpha_i is None else alpha_i + alpha_j
+
+        if index.numel() == 0:
+            return alpha
+    
+        if edge_attr is not None and self.lin_edge is not None:
+
+            edge_attr = self.lin_edge(edge_attr)
+            edge_attr = edge_attr.view(-1, self.heads, self.out_channels)
+            alpha_edge = (edge_attr * self.att_edge).sum(dim=1)
+            alpha = alpha + alpha_edge
+
+        alpha = F.leaky_relu(alpha, self.negative_slope)
+        alpha = torch_geometric.utils.softmax(alpha, index, ptr, dim_size)
+        alpha = F.dropout(alpha, p = self.dropout, training=self.training)
+        return alpha
+
+    def messgae(self, x_j, alpha):
+        
+        return alpha.unsqueeze(-1)*x_j
+
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}({self.in_channels}, '
+                f'{self.out_channels}, heads={self.heads})')

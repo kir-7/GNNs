@@ -49,7 +49,7 @@ class GNN(nn.Module):
         return out
 
 
-class SpatialGCN(nn.Module):
+class GCN(nn.Module):
     
     '''
         we have the SpatialGCN which uses the Spatial convolution layers, the filters used represent the dimentionality of the node embeddings
