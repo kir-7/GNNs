@@ -63,16 +63,13 @@ class GCN(nn.Module):
 
     '''
 
-    def __init__(self, conv_layer_filters, emb_dim, out_dim, aggr='add', edge_dim=4, egde_usage=False, activation='relu', norm='batch'):
+    def __init__(self, conv_layer_filters, emb_dim, in_dim, out_dim, aggr='add', edge_dim=4, egde_usage=False, activation='relu', norm='batch'):
 
         super().__init__()
 
-        self.edge_usage = egde_usage
-
+        
         self.convs = torch.nn.ModuleList()
 
-        if egde_usage:
-            self.edge_messages = torch.nn.ModuleList()
 
         self.activation = {"relu":ReLU(), 'selu':SiLU()}[activation]
         self.norm = {"layer": LayerNorm, "batch": BatchNorm1d}[norm]
@@ -80,25 +77,24 @@ class GCN(nn.Module):
         # conv_layers_filters : List of filters that are going to be applied. 
         # eg: if  conv_layers_filters = [16, 32, 64] then 2 convolutional layers will be applied: 16->32 and 32->64
 
-        self.project = Linear(emb_dim, conv_layer_filters[0])
+        self.lin_in = Sequential(Linear(in_dim, emb_dim), self.activation,  
+                                 Linear(emb_dim, conv_layer_filters[0]), self.activation)
 
         for i in range(len(conv_layer_filters)-1):
             self.convs.append(gConv(conv_layer_filters[i], conv_layer_filters[i+1], aggr=aggr))
 
-            if egde_usage:
-                self.edge_messages.append(Sequential(
-                                            Linear(conv_layer_filters[i+1] + edge_dim, conv_layer_filters[i+1]), self.norm(emb_dim), self.activation,
-                                            Linear(conv_layer_filters[i+1], conv_layer_filters[i+1]), self.norm(emb_dim), ReLU()))
 
         self.pool = global_mean_pool
 
         self.lin_pred = Linear(conv_layer_filters[-1], out_dim)
 
-                   
-
+                
 
     def reset_parameters(self):
         super().reset_parameters()
+        for layer in self.lin_in:
+            if hasattr(layer, 'reset_parameters'):
+                layer.reset_parameters()
         for conv in self.convs:
             conv.reset_parameters()
         self.pool.reset_parameters()
@@ -108,12 +104,11 @@ class GCN(nn.Module):
         
         x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
 
+        x = self.lin_in(x)
 
         for i in range(len(self.convs)):
-            x = x + self.convs[i](x, edge_index)
-            msg = torch.cat([x, edge_attr])
-            x = x + self.edge_messages[i](msg)
-
+            x = self.convs[i](x, edge_index, edge_attr)
+        
         h_graph = self.pool(x, data.batch)
         
         out = self.lin_pred(h_graph)

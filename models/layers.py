@@ -2,11 +2,12 @@
 import torch
 from torch import nn
 import torch.functional as F
-from torch.nn import ReLU, SiLU, Linear, Sequential, LayerNorm, BatchNorm1d, Parameter
+from torch.nn import ReLU, SiLU, Sequential, LayerNorm, BatchNorm1d, Parameter
+
 
 import torch_geometric
 import torch_geometric.transforms as T
-from torch_geometric.nn import MessagePassing, global_mean_pool
+from torch_geometric.nn import MessagePassing, Linear, global_mean_pool
 from torch_geometric.nn.inits import zeros, glorot
 from torch_geometric.utils import add_self_loops, degree, get_laplacian, remove_self_loops
 from torch_scatter import scatter
@@ -50,10 +51,13 @@ class gLayer(MessagePassing):
         super().reset_parameters()
         
         for layer_msg in self.mlp_msg.children():
-            layer_msg.reset_parameters()
+            if hasattr(layer_msg, 'reset_parameters'):
+                layer_msg.reset_parameters()
+            
 
         for layer_upd in self.mlp_upd.children():
-            layer_upd.reset_parameters()
+            if hasattr(layer_upd, 'reset_parameters'):
+                layer_upd.reset_parameters()
 
 
     def forward(self, h, edge_index, edge_attr):
@@ -98,14 +102,16 @@ class gConv(MessagePassing):
 
     '''
 
-    def __init__(self, in_channels, out_channels, bias=True, activation='relu', aggr='add'):
+    def __init__(self, in_channels, out_channels, edge_dim=None, bias=True, activation='relu', aggr='add'):
         
         super().__init__(aggr=aggr)
 
         
         self.activation = {"silu": SiLU(), "relu": ReLU()}[activation]
 
-        self.lin = Linear(in_channels, out_channels, bias= False, weight_initializer='glorot', activation=self.activation)
+        self.lin = Sequential(Linear(in_channels, out_channels, bias= False, weight_initializer='glorot'), self.activation)
+        
+        self.edge_weights = edge_dim
 
         if bias:
             self.bias = Parameter(torch.empty(out_channels))
@@ -116,20 +122,31 @@ class gConv(MessagePassing):
 
     def reset_parameters(self):
         super().reset_parameters()
-        self.lin.reset_parameters()
+        for layer in self.lin.children():
+            if hasattr(layer, 'reset_parameters'):
+                layer.reset_parameters()
         self.bias.data.zero_()
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, edge_attr):
+
+        if self.edge_weights is not None:
         
-        edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
+            edge_index, edge_attr = add_self_loops(edge_index, edge_attr, num_nodes=x.size(0))
+        else:
+            edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
 
-        x = self.lin(x)
-
+    
         row, col = edge_index
         deg = degree(col, x.size(0), dtype=x.dtype)
         deg_inv_sqrt = deg.pow(-0.5)
         deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-        norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
+
+        if self.edge_weights is not None:
+            norm = deg_inv_sqrt[row] * edge_attr * deg_inv_sqrt[col]
+        else:
+            norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
+            
+        x = self.lin(x)
 
         out = self.propagate(edge_index, x=x, norm=norm)
 
@@ -137,7 +154,7 @@ class gConv(MessagePassing):
 
         return out
 
-    def message(self, x_j, norm):
+    def message(self, x_i, x_j, norm):
 
         return norm.view(-1, 1) * x_j
     
@@ -367,3 +384,17 @@ class GATConv(MessagePassing):
     def __repr__(self) -> str:
         return (f'{self.__class__.__name__}({self.in_channels}, '
                 f'{self.out_channels}, heads={self.heads})')
+
+'''
+In all of these models we are using the edge attributes to update the node attributes but we are never updateing the edge attributes themselves:
+
+a good convolution example:https://arxiv.org/pdf/1906.01227
+
+'''
+
+
+# class GIN(MessagePassing):
+#     pass
+
+# class gDiffConv(MessagePassing):
+#     pass
