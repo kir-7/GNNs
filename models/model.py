@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import global_mean_pool
 
 
-from models.layers import gLayer, gConv
+from models.layers import gLayer, gConv, GATConv
 
 
 class GNN(nn.Module):
@@ -13,7 +13,8 @@ class GNN(nn.Module):
 
         super().__init__()
         
-
+        self.emb_dim = emb_dim
+         
         self.lin_in = Linear(in_dim, emb_dim)   
 
         self.convs = torch.nn.ModuleList()
@@ -48,6 +49,9 @@ class GNN(nn.Module):
 
         return out
 
+    def __repr__(self):
+        return f"MPNN Model({self.n_layers} layers, {self.emb_dim} emb_dim)"
+
 
 class GCN(nn.Module):
     
@@ -63,12 +67,13 @@ class GCN(nn.Module):
 
     '''
 
-    def __init__(self, conv_layer_filters, emb_dim, in_dim, out_dim, aggr='add', edge_dim=4, egde_usage=False, activation='relu', norm='batch'):
+    def __init__(self, conv_layer_filters, emb_dim, in_dim, out_dim, edge_dim=4, aggr='add', egde_usage=False, activation='relu', norm='batch'):
 
         super().__init__()
 
         
         self.convs = torch.nn.ModuleList()
+        self.conv_layer_filters = conv_layer_filters
 
 
         self.activation = {"relu":ReLU(), 'selu':SiLU()}[activation]
@@ -81,7 +86,7 @@ class GCN(nn.Module):
                                  Linear(emb_dim, conv_layer_filters[0]), self.activation)
 
         for i in range(len(conv_layer_filters)-1):
-            self.convs.append(gConv(conv_layer_filters[i], conv_layer_filters[i+1], aggr=aggr))
+            self.convs.append(gConv(conv_layer_filters[i], conv_layer_filters[i+1], edge_dim=edge_dim, aggr=aggr))
 
 
         self.pool = global_mean_pool
@@ -114,3 +119,7 @@ class GCN(nn.Module):
         out = self.lin_pred(h_graph)
 
         return out
+
+    def __repr__(self):
+        return f"GCN model (gconv, {self.conv_layer_filters})"
+

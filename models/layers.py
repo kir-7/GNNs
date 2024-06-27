@@ -8,8 +8,9 @@ from torch.nn import ReLU, SiLU, Sequential, LayerNorm, BatchNorm1d, Parameter
 import torch_geometric
 import torch_geometric.transforms as T
 from torch_geometric.nn import MessagePassing, Linear, global_mean_pool
-from torch_geometric.nn.inits import zeros, glorot
-from torch_geometric.utils import add_self_loops, degree, get_laplacian, remove_self_loops
+from torch_geometric.nn.inits import zeros, glorot, reset
+from torch_geometric.nn.models import MLP
+from torch_geometric.utils import add_self_loops, degree, get_laplacian, remove_self_loops, spmm
 from torch_scatter import scatter
 
 
@@ -142,7 +143,11 @@ class gConv(MessagePassing):
         deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
 
         if self.edge_weights is not None:
-            norm = deg_inv_sqrt[row] * edge_attr * deg_inv_sqrt[col]
+
+            deg_inv_sqrt_row = deg_inv_sqrt[row].unsqueeze(-1)
+            deg_inv_sqrt_col = deg_inv_sqrt[col].unsqueeze(-1)
+            norm = deg_inv_sqrt_row * edge_attr * deg_inv_sqrt_col
+
         else:
             norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
             
@@ -154,9 +159,9 @@ class gConv(MessagePassing):
 
         return out
 
-    def message(self, x_i, x_j, norm):
+    def message(self, x_j, norm):
 
-        return norm.view(-1, 1) * x_j
+        return torch.matmul(norm, x_j)
     
 '''
     After Spatial Convolution next step is more methods of convolutions and building different models using convolutions
@@ -256,7 +261,7 @@ class ChebConv(MessagePassing):
 Coming up GATs and random walks (very messed up ordering)
 '''
 class GATConv(MessagePassing):
-    def __init__(self, in_channels, out_channels, heads=1, concat=True, dropout=0, neagative_slope = 0.2, add_self_loops=True, edge_dim=None, bias=True):
+    def __init__(self, in_channels, out_channels, edge_dim=None, heads=1, concat=True, dropout=0, neagative_slope = 0.2, add_self_loops=True, bias=True):
         
         super().__init__()
 
@@ -393,8 +398,65 @@ a good convolution example:https://arxiv.org/pdf/1906.01227
 '''
 
 
-# class GIN(MessagePassing):
-#     pass
+class GIN(MessagePassing):
+    def __init__(self, in_channels, out_channels, edge_dim, aggr = 'add', eps = 0, train_eps=False):
+        
+        super().__init__(aggr=aggr)
+        self.aggr = aggr
+        self.initial_eps = eps
+        
+        if train_eps:
+            self.eps = torch.nn.Parameter(torch.empty(1))
+        else:
+            self.register_buffer('eps', torch.empty(1))
+
+        self.mlp = MLP([in_channels, out_channels, out_channels], act=self.act, act_first=self.act_first, norm=self.norm, norm_kwargs=self.norm_kwargs)
+        
+        if edge_dim is not None:
+            if isinstance(self.mlp, torch.nn.Sequential):
+                mlp = self.mlp[0]
+            if hasattr(nn, 'in_features'):
+                in_channels = mlp.in_features
+            elif hasattr(nn, 'in_channels'):
+                in_channels = mlp.in_channels
+
+            self.lin_in = Linear(edge_dim, in_channels)    
+        else:
+            self.lin_in = None
+
+        self.reset_parameters()
+
+
+
+    def reset_parameters(self) -> None:
+        super().reset_parameters()
+        reset(self.mlp)
+        self.eps.data.fill_(self.initial_eps)
+        if self.lin_in is not None:
+            self.lin_in.reset_parameters()
+    
+
+    def forward(self, x, edge_index, edge_attr, size=None):
+
+        x = (x, x)
+
+        out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=size)
+
+        x_r = x[1]
+
+        out = out + (1 + self.eps)*x_r
+
+        return self.mlp(out)
+
+    def message(self, x_j):
+        if self.lin is not None:
+            edge_attr = self.lin(edge_attr)
+
+        return (x_j + edge_attr).relu()
+
+    def __repr__(self) -> str:
+        return f'{self.__class__.__name__}(mlp={self.mlp})'
+
 
 # class gDiffConv(MessagePassing):
 #     pass
