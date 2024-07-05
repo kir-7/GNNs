@@ -261,9 +261,9 @@ class ChebConv(MessagePassing):
 Coming up GATs and random walks (very messed up ordering)
 '''
 class GATConv(MessagePassing):
-    def __init__(self, in_channels, out_channels, edge_dim=None, heads=1, concat=True, dropout=0, neagative_slope = 0.2, add_self_loops=True, bias=True):
+    def __init__(self, in_channels, out_channels, edge_dim=None, heads=1, concat=True, dropout=0, neagative_slope = 0.2, update_edges=False, add_self_loops=True, bias=True, fill_value='mean'):
         
-        super().__init__()
+        super().__init__(node_dim=0, aggr='add')
 
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -273,8 +273,12 @@ class GATConv(MessagePassing):
         self.add_self_loops = add_self_loops
         self.negative_slope = neagative_slope
         self.edge_dim = edge_dim
+        self.update_edges = update_edges
+        self.fill_value = fill_value
 
         self.lin_in = None
+
+        
 
         self.lin_in = Linear(in_channels, heads*out_channels, bias=False, weight_initializer='glorot')
 
@@ -288,6 +292,14 @@ class GATConv(MessagePassing):
         
         else:
             self.lin_edge = self.att_edge = None
+
+        if edge_dim is not None and update_edges:
+            self.phi_1 = Linear(edge_dim, edge_dim, bias=False, weight_initializer='glorot')
+            self.phi_2 = Linear(in_channels, edge_dim, bias=False, weight_initializer='glorot')
+            self.phi_3 = Linear(in_channels, edge_dim, bias=False, weight_initializer='glorot')
+        
+        elif edge_dim is None and update_edges:
+            raise Exception("need to provide edge_attr to update them")
 
         if bias and concat:
             self.bias = Parameter(torch.empty(heads * out_channels))
@@ -315,6 +327,7 @@ class GATConv(MessagePassing):
     def forward(self, x, edge_index, edge_attr, size=None):
         
         H, C = self.heads, self.out_channels
+        x_copy = x.clone()
 
         if isinstance(x, torch.Tensor):
 
@@ -330,13 +343,14 @@ class GATConv(MessagePassing):
                 if x_dst is not None:
                     x_dst = self.lin_in(x).view(-1, H, C)
         
-
+    
         x = (x_src, x_dst)
 
         alpha_src = (x_src * self.att_src).sum(dim=-1)
         alpha_dst = None if x_dst is None else (x_dst * self.att_dst).sum(-1)
         alpha = (alpha_src, alpha_dst)
     
+
         if self.add_self_loops:
             num_nodes = x_src.size(0)
             if x_dst is not None:
@@ -347,11 +361,12 @@ class GATConv(MessagePassing):
             edge_index, edge_attr = add_self_loops(
                 edge_index, edge_attr, fill_value=self.fill_value,
                 num_nodes=num_nodes)
-
-        alpha = self.edge_updater(edge_index, alpha=alpha, edge_attr=edge_attr, size=size)
+        
+        alpha, e_out = self.edge_updater(edge_index, x=x_copy, alpha=alpha, edge_attr=edge_attr, size=size)
 
         out = self.propagate(edge_index, x=x, alpha=alpha, size=size)
 
+        
         if self.concat:
             out = out.view(-1, self.heads*self.out_channels)
         else:
@@ -361,29 +376,34 @@ class GATConv(MessagePassing):
             out = out + self.bias
         
 
-        return out
+        return (out, e_out)
 
-    def edge_update(self, alpha_j, alpha_i, edge_attr, index, ptr, dim_size):
-
+    def edge_update(self, x_j, x_i, alpha_j, alpha_i, edge_attr, index, ptr, dim_size):
         alpha = alpha_j if alpha_i is None else alpha_i + alpha_j
+
+        e_out = edge_attr
 
         if index.numel() == 0:
             return alpha
     
         if edge_attr is not None and self.lin_edge is not None:
 
+            if self.update_edges:
+                edge_attr_copy = edge_attr.clone()
+                e_out = self.phi_1(edge_attr_copy) + self.phi_2(x_i) + self.phi_3(x_j)
+
             edge_attr = self.lin_edge(edge_attr)
             edge_attr = edge_attr.view(-1, self.heads, self.out_channels)
             alpha_edge = (edge_attr * self.att_edge).sum(dim=1)
             alpha = alpha + alpha_edge
 
-        alpha = F.leaky_relu(alpha, self.negative_slope)
+        alpha = nn.functional.leaky_relu(alpha, self.negative_slope)
         alpha = torch_geometric.utils.softmax(alpha, index, ptr, dim_size)
-        alpha = F.dropout(alpha, p = self.dropout, training=self.training)
-        return alpha
+        alpha = nn.functional.dropout(alpha, p = self.dropout, training=self.training)
+        
+        return (alpha, e_out)
 
     def messgae(self, x_j, alpha):
-        
         return alpha.unsqueeze(-1)*x_j
 
     def __repr__(self) -> str:
