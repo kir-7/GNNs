@@ -261,150 +261,220 @@ class ChebConv(MessagePassing):
 Coming up GATs and random walks (very messed up ordering)
 '''
 class GATConv(MessagePassing):
-    def __init__(self, in_channels, out_channels, edge_dim=None, heads=1, concat=True, dropout=0, neagative_slope = 0.2, update_edges=False, add_self_loops=True, bias=True, fill_value='mean'):
-        
-        super().__init__(node_dim=0, aggr='add')
+    def __init__(
+            self,
+            in_channels,
+            out_channels: int,
+            heads: int = 1,
+            concat: bool = True,
+            negative_slope: float = 0.2,
+            dropout: float = 0.0,
+            add_self_loops: bool = True,
+            edge_dim = None,
+            fill_value = 'mean',
+            bias: bool = True,
+            update_edges = False,
+            **kwargs,
+        ):
+            kwargs.setdefault('aggr', 'add')
+            super().__init__(node_dim=0, **kwargs)
 
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.heads = heads
-        self.concat = concat
-        self.dropout = dropout
-        self.add_self_loops = add_self_loops
-        self.negative_slope = neagative_slope
-        self.edge_dim = edge_dim
-        self.update_edges = update_edges
-        self.fill_value = fill_value
+            self.in_channels = in_channels
+            self.out_channels = out_channels
+            self.heads = heads
+            self.concat = concat
+            self.negative_slope = negative_slope
+            self.dropout = dropout
+            self.add_self_loops = add_self_loops
+            self.edge_dim = edge_dim
+            self.fill_value = fill_value
+            self.update_edges = update_edges
 
-        self.lin_in = None
+            # In case we are operating in bipartite graphs, we apply separate
+            # transformations 'lin_src' and 'lin_dst' to source and target nodes:
+            self.lin = self.lin_src = self.lin_dst = None
+            if isinstance(in_channels, int):
+                self.lin = Linear(in_channels, heads * out_channels, bias=False,
+                                weight_initializer='glorot')
+            else:
+                self.lin_src = Linear(in_channels[0], heads * out_channels, False,
+                                    weight_initializer='glorot')
+                self.lin_dst = Linear(in_channels[1], heads * out_channels, False,
+                                    weight_initializer='glorot')
 
-        
+            # The learnable parameters to compute attention coefficients:
+            self.att_src = Parameter(torch.empty(1, heads, out_channels))
+            self.att_dst = Parameter(torch.empty(1, heads, out_channels))
 
-        self.lin_in = Linear(in_channels, heads*out_channels, bias=False, weight_initializer='glorot')
+            if edge_dim is not None:
+                self.lin_edge = Linear(edge_dim, heads * out_channels, bias=False,
+                                    weight_initializer='glorot')
+                self.att_edge = Parameter(torch.empty(1, heads, out_channels))
 
-        self.att_src = Parameter(torch.empty(1, heads, out_channels))
-        self.att_dst = Parameter(torch.empty(1, heads, out_channels))
+                if update_edges:
+                    self.phi_1 = Linear(edge_dim, edge_dim, bias=False, weight_initializer='glorot')
+                    self.phi_2 = Linear(in_channels, edge_dim, bias=False, weight_initializer='glorot')
+                    self.phi_3 = Linear(in_channels, edge_dim, bias=False, weight_initializer='glorot')
 
-        if edge_dim is not None:
-        
-            self.lin_edge = Linear(edge_dim, heads*out_channels, bias=False, weight_initializer='glorot')
-            self.att_edge = Parameter(torch.empty(1, heads, out_channels))
-        
-        else:
-            self.lin_edge = self.att_edge = None
+            else:
+                self.lin_edge = None
+                self.register_parameter('att_edge', None)
 
-        if edge_dim is not None and update_edges:
-            self.phi_1 = Linear(edge_dim, edge_dim, bias=False, weight_initializer='glorot')
-            self.phi_2 = Linear(in_channels, edge_dim, bias=False, weight_initializer='glorot')
-            self.phi_3 = Linear(in_channels, edge_dim, bias=False, weight_initializer='glorot')
-        
-        elif edge_dim is None and update_edges:
-            raise Exception("need to provide edge_attr to update them")
+            if bias and concat:
+                self.bias = Parameter(torch.empty(heads * out_channels))
+            elif bias and not concat:
+                self.bias = Parameter(torch.empty(out_channels))
+            else:
+                self.register_parameter('bias', None)
 
-        if bias and concat:
-            self.bias = Parameter(torch.empty(heads * out_channels))
-        elif bias and not concat:
-            self.bias = Parameter(torch.empty(out_channels))
-        else:
-            self.bias = None
+            self.reset_parameters()
 
-    def reset_parameters(self) -> None:
-        super().reset_parameters()
-        self.lin_in.reset_parameters()
-        self.lin_edge.reset_parameters()
-
-        if self.lin_edge is not None:
-            self.lin_edge.reset_parameters()
-        
-        if self.att_edge:
-            glorot(self.att_edge)
-
-        zeros(self.bias)
-        glorot(self.att_dst)
-        glorot(self.att_src)
-        
-    
-    def forward(self, x, edge_index, edge_attr, size=None):
-        
-        H, C = self.heads, self.out_channels
-        x_copy = x.clone()
-
-        if isinstance(x, torch.Tensor):
-
-            if self.lin_in is not None:
-                x_src = x_dst = self.lin_in(x).view(-1, H, C)
-        else:
-            x_src, x_dst = x
-
-            if self.lin_in is not None:
-
-                x_src = self.lin_in(x).view(-1, H, C)
-
-                if x_dst is not None:
-                    x_dst = self.lin_in(x).view(-1, H, C)
-        
-    
-        x = (x_src, x_dst)
-
-        alpha_src = (x_src * self.att_src).sum(dim=-1)
-        alpha_dst = None if x_dst is None else (x_dst * self.att_dst).sum(-1)
-        alpha = (alpha_src, alpha_dst)
-    
-
-        if self.add_self_loops:
-            num_nodes = x_src.size(0)
-            if x_dst is not None:
-                num_nodes = min(num_nodes, x_dst.size(0))
-            num_nodes = min(size) if size is not None else num_nodes
-            edge_index, edge_attr = remove_self_loops(
-                edge_index, edge_attr)
-            edge_index, edge_attr = add_self_loops(
-                edge_index, edge_attr, fill_value=self.fill_value,
-                num_nodes=num_nodes)
-        
-        alpha, e_out = self.edge_updater(edge_index, x=x_copy, alpha=alpha, edge_attr=edge_attr, size=size)
-
-        out = self.propagate(edge_index, x=x, alpha=alpha, size=size)
-
-        
-        if self.concat:
-            out = out.view(-1, self.heads*self.out_channels)
-        else:
-            out = out.mean(dim=1)
-        
-        if self.bias is not None:
-            out = out + self.bias
-        
-
-        return (out, e_out)
-
-    def edge_update(self, x_j, x_i, alpha_j, alpha_i, edge_attr, index, ptr, dim_size):
-        alpha = alpha_j if alpha_i is None else alpha_i + alpha_j
-
-        e_out = edge_attr
-
-        if index.numel() == 0:
-            return alpha
-    
-        if edge_attr is not None and self.lin_edge is not None:
-
+    def reset_parameters(self):
+            super().reset_parameters()
+            if self.lin is not None:
+                self.lin.reset_parameters()
+            if self.lin_src is not None:
+                self.lin_src.reset_parameters()
+            if self.lin_dst is not None:
+                self.lin_dst.reset_parameters()
+            if self.lin_edge is not None:
+                self.lin_edge.reset_parameters()
             if self.update_edges:
-                edge_attr_copy = edge_attr.clone()
-                e_out = self.phi_1(edge_attr_copy) + self.phi_2(x_i) + self.phi_3(x_j)
+                self.phi_1.reset_parameters()
+                self.phi_2.reset_parameters()
+                self.phi_3.reset_parameters()
 
-            edge_attr = self.lin_edge(edge_attr)
-            edge_attr = edge_attr.view(-1, self.heads, self.out_channels)
-            alpha_edge = (edge_attr * self.att_edge).sum(dim=1)
-            alpha = alpha + alpha_edge
+            glorot(self.att_src)
+            glorot(self.att_dst)
+            glorot(self.att_edge)
+            zeros(self.bias)
 
-        alpha = nn.functional.leaky_relu(alpha, self.negative_slope)
-        alpha = torch_geometric.utils.softmax(alpha, index, ptr, dim_size)
-        alpha = nn.functional.dropout(alpha, p = self.dropout, training=self.training)
-        
-        return (alpha, e_out)
 
-    def messgae(self, x_j, alpha):
-        return alpha.unsqueeze(-1)*x_j
+    def forward(  # noqa: F811
+            self,
+            x,
+            edge_index,
+            edge_attr = None,
+            size = None,
+            return_attention_weights = None,
+        ):
+
+
+            H, C = self.heads, self.out_channels
+            x_copy = x.clone()
+
+            # We first transform the input node features. If a tuple is passed, we
+            # transform source and target node features via separate weights:
+            if isinstance(x, torch.Tensor):
+                assert x.dim() == 2, "Static graphs not supported in 'GATConv'"
+
+                if self.lin is not None:
+                    x_src = x_dst = self.lin(x).view(-1, H, C)
+                else:
+                    # If the module is initialized as bipartite, transform source
+                    # and destination node features separately:
+                    assert self.lin_src is not None and self.lin_dst is not None
+                    x_src = self.lin_src(x).view(-1, H, C)
+                    x_dst = self.lin_dst(x).view(-1, H, C)
+
+            else:  # Tuple of source and target node features:
+                x_src, x_dst = x
+                assert x_src.dim() == 2, "Static graphs not supported in 'GATConv'"
+
+                if self.lin is not None:
+                    # If the module is initialized as non-bipartite, we expect that
+                    # source and destination node features have the same shape and
+                    # that they their transformations are shared:
+                    x_src = self.lin(x_src).view(-1, H, C)
+                    if x_dst is not None:
+                        x_dst = self.lin(x_dst).view(-1, H, C)
+                else:
+                    assert self.lin_src is not None and self.lin_dst is not None
+
+                    x_src = self.lin_src(x_src).view(-1, H, C)
+                    if x_dst is not None:
+                        x_dst = self.lin_dst(x_dst).view(-1, H, C)
+
+            x = (x_src, x_dst)
+
+            # Next, we compute node-level attention coefficients, both for source
+            # and target nodes (if present):
+            alpha_src = (x_src * self.att_src).sum(dim=-1)
+            alpha_dst = None if x_dst is None else (x_dst * self.att_dst).sum(-1)
+            alpha = (alpha_src, alpha_dst)
+
+            if self.add_self_loops:
+                if isinstance(edge_index, torch.Tensor):
+                    # We only want to add self-loops for nodes that appear both as
+                    # source and target nodes:
+                    num_nodes = x_src.size(0)
+                    if x_dst is not None:
+                        num_nodes = min(num_nodes, x_dst.size(0))
+                    num_nodes = min(size) if size is not None else num_nodes
+                    edge_index, edge_attr = remove_self_loops(
+                        edge_index, edge_attr)
+                    edge_index, edge_attr = add_self_loops(
+                        edge_index, edge_attr, fill_value=self.fill_value,
+                        num_nodes=num_nodes)
+                elif isinstance(edge_index, SparseTensor):
+                    if self.edge_dim is None:
+                        edge_index = torch_sparse.set_diag(edge_index)
+                    else:
+                        raise NotImplementedError(
+                            "The usage of 'edge_attr' and 'add_self_loops' "
+                            "simultaneously is currently not yet supported for "
+                            "'edge_index' in a 'SparseTensor' form")
+
+            # edge_updater_type: (alpha: OptPairTensor, edge_attr: OptTensor)
+            alpha, e_out = self.edge_updater(edge_index, x=x_copy, alpha=alpha, edge_attr=edge_attr,
+                                    size=size)
+
+            # propagate_type: (x: OptPairTensor, alpha: Tensor)
+            out = self.propagate(edge_index, x=x, alpha=alpha, size=size)
+
+            if self.concat:
+                out = out.view(-1, self.heads * self.out_channels)
+            else:
+                out = out.mean(dim=1)
+
+            if self.bias is not None:
+                out = out + self.bias
+
+            return out, e_out
+
+
+    def edge_update(self, x_j, x_i, alpha_j, alpha_i,
+                        edge_attr, index, ptr,
+                        dim_size) :
+
+            alpha = alpha_j if alpha_i is None else alpha_j + alpha_i
+
+            e_out = edge_attr
+
+            if index.numel() == 0:
+                return alpha
+            if edge_attr is not None and self.lin_edge is not None:
+                if edge_attr.dim() == 1:
+                    edge_attr = edge_attr.view(-1, 1)
+
+
+                if self.update_edges:
+                    edge_attr_c = edge_attr.clone()
+                    e_out = self.phi_1(edge_attr_c) + self.phi_2(x_i) + self.phi_3(x_j)
+
+                edge_attr = self.lin_edge(edge_attr)
+                edge_attr = edge_attr.view(-1, self.heads, self.out_channels)
+                alpha_edge = (edge_attr * self.att_edge).sum(dim=-1)
+                alpha = alpha + alpha_edge
+
+            alpha = F.leaky_relu(alpha, self.negative_slope)
+            alpha = torch_geometric.utils.softmax(alpha, index, ptr, dim_size)
+            alpha = F.dropout(alpha, p=self.dropout, training=self.training)
+
+            return alpha, e_out
+
+    def message(self, x_j, alpha):
+        return alpha.unsqueeze(-1) * x_j
 
     def __repr__(self) -> str:
         return (f'{self.__class__.__name__}({self.in_channels}, '

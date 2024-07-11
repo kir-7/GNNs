@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import torch_geometric
 import torch_geometric.transforms as T
 from torch_geometric.utils import remove_self_loops, to_dense_adj, dense_to_sparse
@@ -89,6 +90,64 @@ def permutation_equivariance_unit_test(module, dataloader):
 
     # Check whether output varies after applying transformations
     return torch.allclose(out_1[perm], out_2, atol=1e-04) 
+
+
+def pad_edge_attr(true_edge_attr, pred_edge_attr, device):
+    # Define the "none" edge
+    none_edge = torch.tensor([1, 0, 0, 0], device=true_edge_attr.device, dtype=true_edge_attr.dtype)
+
+    # Determine the number of edges
+    true_edge_count = true_edge_attr.size(0)
+    pred_edge_count = pred_edge_attr.size(0)
+
+    # Pad true_edge_attr if necessary
+    if true_edge_count < pred_edge_count:
+        padding = none_edge.repeat(pred_edge_count - true_edge_count, 1)
+        true_edge_attr = torch.cat([true_edge_attr, padding], dim=0)
+
+    # Pad pred_edge_attr if necessary
+    if pred_edge_count < true_edge_count:
+        padding = none_edge.repeat(true_edge_count - pred_edge_count, 1)
+        pred_edge_attr = torch.cat([pred_edge_attr, padding], dim=0)
+
+    true_edge_attr = true_edge_attr.to(device)
+    pred_edge_attr = pred_edge_attr.to(device)
+    return true_edge_attr, pred_edge_attr
+
+def create_atom_count_vectors(d, M, R, batch_size, device):
+
+    atom_count_vectors = torch.zeros(batch_size, M, R, dtype=torch.float).to(device)
+
+    for i in range(batch_size):
+
+        atom_counts = torch.sum(d[0].x[:, 0:5].transpose(0, 1), dim=1)
+        onehot_vectors = torch.zeros(5, R)
+
+        # Create masks for each atom type and set the corresponding positions to 1
+        for k in range(5):
+            atom_count = int(atom_counts[k].item())  # Convert to integer
+            if atom_count < R:
+                onehot_vectors[k, atom_count] = 1
+            else:
+                onehot_vectors[k, R - 1] = 1
+
+        atom_count_vectors[i, :] = onehot_vectors
+
+
+
+    return atom_count_vectors.view(-1, R)
+
+
+def molecular_loss(true_edge_attr, pred_edge_attr, true_node_prob, pred_node_prob, mu, logvar, lambda_e=1.0, lambda_a=1.0, lambda_kl=0.1, epsilon=1e-8):
+
+    edge_loss = F.cross_entropy(pred_edge_attr, true_edge_attr)
+
+    node_loss = F.cross_entropy(pred_node_prob, true_node_prob)
+
+    kl_loss = -0.5 * torch.mean(torch.sum(1 + logvar - mu**2 - (logvar.exp() + epsilon)**2, dim=1), dim=0)
+
+    return lambda_e*edge_loss + lambda_a*node_loss + lambda_kl*kl_loss
+
 
 
 def train(model, train_loader, loss_function, optimizer, device='cpu'):
