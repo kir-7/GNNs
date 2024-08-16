@@ -12,6 +12,7 @@ from torch_geometric.nn.inits import zeros, glorot, reset
 from torch_geometric.nn.models import MLP
 from torch_geometric.utils import add_self_loops, degree, get_laplacian, remove_self_loops, spmm
 from torch_scatter import scatter
+import torch_sparse
 
 
 # GNN have 3 types of pooling(information gathering from other nodes, edges and global) - message passing, convolutions and Pooling
@@ -546,7 +547,3 @@ class GIN(MessagePassing):
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}(mlp={self.mlp})'
-
-
-# class gDiffConv(MessagePassing):
-#     pass

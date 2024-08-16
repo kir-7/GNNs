@@ -211,6 +211,9 @@ def run_experiment(model, model_name, n_epochs, loss_function, optimizer, schedu
         
         # Evaluate model on validation set
         val_error = eval(model, val_loader, loss_function, device)
+
+        scheduler.step(val_error)
+        
         
         if best_val_error is None or val_error <= best_val_error:
             # Evaluate model on test set if validation metric improves
